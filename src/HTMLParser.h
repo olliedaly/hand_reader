@@ -69,9 +69,35 @@ public:
         script.replace("&gt;", ">");
         script.replace("&quot;", "\"");
         script.replace("&#39;", "'");
+        script.replace("&mdash;", "---");
+        script.replace("&ndash;", "--");
+        script.replace("&hellip;", "...");
+        
+        // Unicode character replacements (common sources of blank squares)
+        // Single quotes
+        script.replace("\u2018", "'");
+        script.replace("\u2019", "'");
+        script.replace("&#8216;", "'");
         script.replace("&#8217;", "'");
+        
+        // Double quotes
+        script.replace("\u201c", "\"");
+        script.replace("\u201d", "\"");
         script.replace("&#8220;", "\"");
         script.replace("&#8221;", "\"");
+        
+        // Dashes
+        script.replace("\u2013", "--");
+        script.replace("\u2014", "---");
+        script.replace("&#8211;", "--");
+        script.replace("&#8212;", "---");
+        
+        // Ellipsis
+        script.replace("\u2026", "...");
+        script.replace("&#8230;", "...");
+
+        // Other common ones
+        script.replace("\u00a0", " "); // non-breaking space
         
         // Collapse multiple spaces
         while (script.indexOf("  ") != -1) {

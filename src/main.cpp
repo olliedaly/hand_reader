@@ -3,8 +3,10 @@
 #include <M5GFX.h>
 #include <vector>
 #include <LittleFS.h>
+#include <ArduinoJson.h>
 #include "EpubReader.h"
 #include "Paginator.h"
+
 
 // --- Constants ---
 #define COLOR_BG TFT_WHITE
@@ -22,8 +24,10 @@ enum AppState {
     STATE_LOADING,
     STATE_READING,
     STATE_MENU,
+    STATE_SKIP_PAGE,
     STATE_ERROR
 };
+
 
 AppState currentState = STATE_HOME;
 
@@ -43,7 +47,57 @@ volatile bool operationSuccess = false;
 volatile bool operationComplete = false;
 
 // Helpers
+void saveBookmark() {
+    if (epubFiles.empty() || currentFileIndex >= epubFiles.size()) return;
+    
+    String filename = epubFiles[currentFileIndex];
+    JsonDocument doc;
+    
+    File f = LittleFS.open("/bookmarks.json", "r");
+    if (f) {
+        deserializeJson(doc, f);
+        f.close();
+    }
+    
+    doc[filename]["chapter"] = currentChapterIndex;
+    doc[filename]["page"] = textScrollOffset;
+    doc[filename]["size"] = currentTextSize;
+    
+    f = LittleFS.open("/bookmarks.json", "w");
+    if (f) {
+        serializeJson(doc, f);
+        f.close();
+        Serial.printf("DEBUG: Save Bookmark [%s] -> Ch:%d, Pg:%d, Sz:%.1f\n", filename.c_str(), currentChapterIndex, textScrollOffset, currentTextSize);
+    } else {
+        Serial.println("DEBUG: Failed to open bookmarks.json for writing!");
+    }
+}
+
+
+void loadBookmark(String filename, int& chapter, int& page, float& size) {
+    File f = LittleFS.open("/bookmarks.json", "r");
+    if (!f) {
+        Serial.println("DEBUG: No bookmarks.json found");
+        return;
+    }
+    
+    JsonDocument doc;
+    deserializeJson(doc, f);
+    f.close();
+    
+    if (doc.containsKey(filename)) {
+        chapter = doc[filename]["chapter"] | 0;
+        page = doc[filename]["page"] | 0;
+        size = doc[filename]["size"] | 4.0;
+        Serial.printf("DEBUG: Load Bookmark [%s] -> Ch:%d, Pg:%d, Sz:%.1f\n", filename.c_str(), chapter, page, size);
+    } else {
+        Serial.printf("DEBUG: No bookmark for [%s]\n", filename.c_str());
+    }
+}
+
+
 void recalculatePages() {
+
     int margin = 10;
     int w = M5.Display.width() - (margin * 2);
     int h = M5.Display.height() - 60; // Space for header
@@ -71,24 +125,43 @@ void asyncLoaderTask(void * parameter) {
         }
         
         if (operationSuccess) {
-            Serial.println("Task: Open Success. Loading Ch 0.");
-            currentChapterIndex = 0;
-            currentTextBuffer = reader.getChapterContent(0);
+            Serial.println("Task: Open Success. Checking Bookmark.");
+            
+            // Load bookmark
+            int savedCh = 0;
+            int savedPg = 0;
+            float savedSize = currentTextSize;
+            loadBookmark(epubFiles[currentFileIndex], savedCh, savedPg, savedSize);
+            
+            currentChapterIndex = savedCh;
+            currentTextSize = savedSize;
+            
+            Serial.printf("Task: Loading Ch %d from Bookmark\n", currentChapterIndex);
+            currentTextBuffer = reader.getChapterContent(currentChapterIndex);
             recalculatePages(); 
+            textScrollOffset = savedPg;
+            Serial.printf("Task: Repaginated. Total Pages: %d, Restoring Pg: %d\n", currentPages.size(), textScrollOffset);
+            if (textScrollOffset >= currentPages.size()) {
+                Serial.println("Task: Restored Page out of bounds, resetting to 0");
+                textScrollOffset = 0;
+            }
         }
+
+
         
     } else if (currentOp == OP_LOAD_CHAPTER) {
-        Serial.printf("Task: Loading Chapter %d\n", targetLoadChapterIndex);
         currentChapterIndex = targetLoadChapterIndex;
         currentTextBuffer = reader.getChapterContent(currentChapterIndex);
         recalculatePages();
+        textScrollOffset = 0; // Reset to start of new chapter
         operationSuccess = true; 
     }
 
+
     if (operationSuccess) {
-        textScrollOffset = 0;
         textRedrawNeeded = true;
     } else {
+
         Serial.println("Task: Operation Failed.");
     }
     
@@ -173,7 +246,11 @@ void drawHome() {
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(TFT_DARKGRAY, COLOR_BG);
     M5.Display.drawCenterString("UP/DN | SELECT", M5.Display.width()/2, M5.Display.height()-30, &fonts::FreeSansBold9pt7b);
+    
+    // Power Button
+    M5.Display.drawRightString("[ POWER OFF ]", M5.Display.width() - 10, M5.Display.height() - 30, &fonts::FreeSansBold9pt7b);
 }
+
 
 void drawReader() {
     if (!textRedrawNeeded) return;
@@ -217,8 +294,8 @@ void drawReader() {
 
 void drawMenu() {
     // Overlay menu
-    // Top 1/4 screen
-    int h = M5.Display.height() / 4;
+    // Top 1/3 screen for more buttons
+    int h = M5.Display.height() / 3;
     M5.Display.fillRect(0, 0, M5.Display.width(), h, TFT_LIGHTGREY);
     M5.Display.drawRect(0, 0, M5.Display.width(), h, TFT_BLACK);
     
@@ -229,15 +306,44 @@ void drawMenu() {
     int bat = M5.Power.getBatteryLevel();
     M5.Display.drawRightString(String(bat) + "%", M5.Display.width() - 10, 10, &fonts::FreeSansBold9pt7b);
 
-    // Buttons (Simple Text for now)
+    // Buttons
     // Left: HOME
-    M5.Display.drawCenterString("[ HOME ]", M5.Display.width() * 0.2, h/2 - 10, &fonts::FreeSansBold9pt7b);
+    M5.Display.drawCenterString("[ HOME ]", M5.Display.width() * 0.15, 60, &fonts::FreeSansBold9pt7b);
     
-    // Right: SIZE
-    M5.Display.drawCenterString("[ SIZE ]", M5.Display.width() * 0.8, h/2 - 10, &fonts::FreeSansBold9pt7b);
+    // PAGE
+    M5.Display.drawCenterString("[ PAGE ]", M5.Display.width() * 0.38, 60, &fonts::FreeSansBold9pt7b);
+    
+    // SIZE
+    M5.Display.drawCenterString("[ SIZE ]", M5.Display.width() * 0.62, 60, &fonts::FreeSansBold9pt7b);
+
+    // Power
+    M5.Display.drawCenterString("[ OFF ]", M5.Display.width() * 0.85, 60, &fonts::FreeSansBold9pt7b);
     
     M5.Display.drawCenterString("MENU", M5.Display.width() * 0.5, 10, &fonts::FreeSansBold9pt7b);
 }
+
+
+void drawSkipPage() {
+    int h = M5.Display.height() / 3;
+    M5.Display.fillRect(0, 0, M5.Display.width(), h, TFT_WHITE);
+    M5.Display.drawRect(0, 0, M5.Display.width(), h, TFT_BLACK);
+    
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    M5.Display.setTextSize(2);
+    M5.Display.drawCenterString("SKIP PAGE", M5.Display.width() * 0.5, 10, &fonts::FreeSansBold9pt7b);
+    
+    M5.Display.setTextSize(3);
+    M5.Display.drawCenterString("Pg: " + String(textScrollOffset + 1), M5.Display.width() * 0.5, 50, &fonts::FreeSansBold9pt7b);
+    
+    M5.Display.setTextSize(2);
+    M5.Display.drawCenterString("[ -10 ]", M5.Display.width() * 0.2, 110, &fonts::FreeSansBold9pt7b);
+    M5.Display.drawCenterString("[ -1 ]", M5.Display.width() * 0.4, 110, &fonts::FreeSansBold9pt7b);
+    M5.Display.drawCenterString("[ +1 ]", M5.Display.width() * 0.6, 110, &fonts::FreeSansBold9pt7b);
+    M5.Display.drawCenterString("[ +10 ]", M5.Display.width() * 0.8, 110, &fonts::FreeSansBold9pt7b);
+    
+    M5.Display.drawCenterString("TAP OUTSIDE TO CLOSE", M5.Display.width() * 0.5, 160, &fonts::FreeSansBold9pt7b);
+}
+
 
 // --- Setup & Loop ---
 
@@ -310,11 +416,21 @@ void loop() {
                     if (currentFileIndex < 0) currentFileIndex = epubFiles.size() - 1;
                     drawHome();
                 } else if (t.y > (height * 2) / 3) {
-                    // Down/Next File
-                    currentFileIndex++;
-                    if (currentFileIndex >= epubFiles.size()) currentFileIndex = 0;
-                    drawHome();
+                    // Down or Power?
+                    // Bottom Right region for Power
+                    if (t.x > width * 0.6) {
+                        M5.Display.fillScreen(COLOR_BG);
+                        M5.Display.drawCenterString("Powering Off...", width/2, height/2, &fonts::FreeSansBold9pt7b);
+                        delay(1000);
+                        M5.Power.powerOff();
+                    } else {
+                        // Down/Next File
+                        currentFileIndex++;
+                        if (currentFileIndex >= epubFiles.size()) currentFileIndex = 0;
+                        drawHome();
+                    }
                 } else {
+
                     // Select (Center)
                     if (epubFiles.size() > 0) {
                         targetOpenFile = "/" + epubFiles[currentFileIndex];
@@ -343,6 +459,7 @@ void loop() {
                     if (textScrollOffset >= currentPages.size()) {
                         // Next Chapter
                          if (currentChapterIndex < reader.getChapters().size() - 1) {
+                            saveBookmark();
                             targetLoadChapterIndex = currentChapterIndex + 1;
                             startAsyncOp(OP_LOAD_CHAPTER);
                         } else {
@@ -350,12 +467,14 @@ void loop() {
                         }
                     } else {
                         textRedrawNeeded = true;
+                        if (textScrollOffset % 5 == 0) saveBookmark(); // Periodic save
                     }
                 } else if (t.x < width * 0.25) {
                     // PREV PAGE
                     textScrollOffset--;
                     if (textScrollOffset < 0) {
                         if (currentChapterIndex > 0) {
+                            saveBookmark();
                             targetLoadChapterIndex = currentChapterIndex - 1;
                              startAsyncOp(OP_LOAD_CHAPTER);
                         } else {
@@ -363,7 +482,9 @@ void loop() {
                         }
                     } else {
                          textRedrawNeeded = true;
+                         if (textScrollOffset % 5 == 0) saveBookmark();
                     }
+
                 } else {
                     // CENTER -> OPEN MENU
                     currentState = STATE_MENU;
@@ -376,8 +497,8 @@ void loop() {
         if (M5.Touch.getCount() > 0) {
             auto t = M5.Touch.getDetail();
             if (t.wasPressed()) {
-                // Top 1/4 is menu.
-                int h = height / 4;
+                // Top 1/3 is menu.
+                int h = height / 3;
                 if (t.y > h) {
                     // Click outside -> Close Menu
                     currentState = STATE_READING;
@@ -385,13 +506,19 @@ void loop() {
                 } else {
                     // Inside Menu
                     // Left (Home)
-                    if (t.x < width * 0.4) {
+                    if (t.x < width * 0.25) {
+                        saveBookmark();
                         reader.close();
                         currentState = STATE_HOME;
                         drawHome();
                     }
-                    // Right (Size)
-                    else if (t.x > width * 0.6) {
+                    // Page Skip
+                    else if (t.x < width * 0.5) {
+                        currentState = STATE_SKIP_PAGE;
+                        drawSkipPage();
+                    }
+                    // Size
+                    else if (t.x < width * 0.75) {
                         // Toggle Size
                         if (currentTextSize <= 3.0) currentTextSize = 4.0;
                         else if (currentTextSize == 4.0) currentTextSize = 6.0;
@@ -401,14 +528,51 @@ void loop() {
                         M5.Display.fillScreen(COLOR_BG);
                         M5.Display.drawCenterString("Resizing...", width/2, height/2, &fonts::FreeSansBold9pt7b);
                         recalculatePages();
+                        saveBookmark();
                         
                         currentState = STATE_READING;
                         textRedrawNeeded = true;
+                    }
+                    // Power Off
+                    else {
+                        saveBookmark();
+                        M5.Display.fillScreen(COLOR_BG);
+                        M5.Display.drawCenterString("Powering Off...", width/2, height/2, &fonts::FreeSansBold9pt7b);
+                        delay(1000);
+                        M5.Power.powerOff();
+                    }
+                }
+
+            }
+        }
+    }
+    else if (currentState == STATE_SKIP_PAGE) {
+        if (M5.Touch.getCount() > 0) {
+            auto t = M5.Touch.getDetail();
+            if (t.wasPressed()) {
+                int h = height / 3;
+                if (t.y > h) {
+                    currentState = STATE_READING;
+                    textRedrawNeeded = true;
+                } else {
+                    // Inside skip menu
+                    if (t.y > 100 && t.y < 150) {
+                        if (t.x < width * 0.3) textScrollOffset -= 10;
+                        else if (t.x < width * 0.5) textScrollOffset -= 1;
+                        else if (t.x < width * 0.7) textScrollOffset += 1;
+                        else textScrollOffset += 10;
+                        
+                        // Bounds check
+                        if (textScrollOffset < 0) textScrollOffset = 0;
+                        if (textScrollOffset >= currentPages.size()) textScrollOffset = currentPages.size() - 1;
+                        
+                        drawSkipPage();
                     }
                 }
             }
         }
     }
+
     
     delay(10);
 }

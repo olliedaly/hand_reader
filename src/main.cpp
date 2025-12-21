@@ -96,6 +96,25 @@ void loadBookmark(String filename, int& chapter, int& page, float& size) {
 }
 
 
+void powerOffSequence() {
+    saveBookmark();
+    M5.Display.fillScreen(COLOR_BG);
+    
+    // Draw Splash Image if exists
+    if (LittleFS.exists("/splash.jpg")) {
+        Serial.println("DEBUG: Drawing splash screen...");
+        M5.Display.drawJpgFile(LittleFS, "/splash.jpg", 0, 0);
+    } else {
+        Serial.println("DEBUG: splash.jpg not found, showing text fallback");
+        M5.Display.drawCenterString("Powering Off...", M5.Display.width()/2, M5.Display.height()/2, &fonts::FreeSansBold9pt7b);
+    }
+    
+    // On E-ink, we need to ensure the screen actually updates before power stays off.
+    // M5GFX usually handles this, but a small delay helps.
+    delay(2000); 
+    M5.Power.powerOff();
+}
+
 void recalculatePages() {
 
     int margin = 10;
@@ -419,10 +438,7 @@ void loop() {
                     // Down or Power?
                     // Bottom Right region for Power
                     if (t.x > width * 0.6) {
-                        M5.Display.fillScreen(COLOR_BG);
-                        M5.Display.drawCenterString("Powering Off...", width/2, height/2, &fonts::FreeSansBold9pt7b);
-                        delay(1000);
-                        M5.Power.powerOff();
+                        powerOffSequence();
                     } else {
                         // Down/Next File
                         currentFileIndex++;
@@ -430,6 +446,7 @@ void loop() {
                         drawHome();
                     }
                 } else {
+
 
                     // Select (Center)
                     if (epubFiles.size() > 0) {
@@ -535,13 +552,10 @@ void loop() {
                     }
                     // Power Off
                     else {
-                        saveBookmark();
-                        M5.Display.fillScreen(COLOR_BG);
-                        M5.Display.drawCenterString("Powering Off...", width/2, height/2, &fonts::FreeSansBold9pt7b);
-                        delay(1000);
-                        M5.Power.powerOff();
+                        powerOffSequence();
                     }
                 }
+
 
             }
         }

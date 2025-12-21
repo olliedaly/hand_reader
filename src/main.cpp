@@ -133,8 +133,15 @@ void drawHome() {
     M5.Display.setTextSize(3);
     M5.Display.setTextColor(COLOR_TEXT, COLOR_BG);
     M5.Display.setCursor(10, 10);
-    M5.Display.println("Library");
-    M5.Display.drawFastHLine(0, 40, M5.Display.width(), TFT_BLACK);
+    M5.Display.print("Library");
+    
+    // Battery Status
+    int bat = M5.Power.getBatteryLevel();
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(TFT_DARKGRAY, COLOR_BG);
+    M5.Display.drawRightString(String(bat) + "%", M5.Display.width() - 10, 12, &fonts::FreeSansBold9pt7b);
+
+    M5.Display.drawFastHLine(0, 42, M5.Display.width(), TFT_BLACK);
 
     int y = 50;
     if (epubFiles.empty()) {
@@ -218,6 +225,10 @@ void drawMenu() {
     M5.Display.setTextColor(TFT_BLACK, TFT_LIGHTGREY);
     M5.Display.setTextSize(2);
     
+    // Battery
+    int bat = M5.Power.getBatteryLevel();
+    M5.Display.drawRightString(String(bat) + "%", M5.Display.width() - 10, 10, &fonts::FreeSansBold9pt7b);
+
     // Buttons (Simple Text for now)
     // Left: HOME
     M5.Display.drawCenterString("[ HOME ]", M5.Display.width() * 0.2, h/2 - 10, &fonts::FreeSansBold9pt7b);

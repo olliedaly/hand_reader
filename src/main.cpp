@@ -4,33 +4,35 @@
 #include <vector>
 #include <LittleFS.h>
 #include "EpubReader.h"
+#include "Paginator.h"
 
 // --- Constants ---
 #define COLOR_BG TFT_WHITE
 #define COLOR_TEXT TFT_BLACK
-#define FONT_SIZE_DEFAULT 2
 
 // --- Globals ---
 EpubReader reader;
 std::vector<String> epubFiles;
 int currentFileIndex = 0;
 int currentChapterIndex = 0;
-int currentPageInChapter = 0; 
 
 // State Machine
 enum AppState {
     STATE_HOME,
     STATE_LOADING,
     STATE_READING,
+    STATE_MENU,
     STATE_ERROR
 };
 
 AppState currentState = STATE_HOME;
 
-// Text Buffer
+// Text Buffer & Pagination
 String currentTextBuffer = "";
-int textScrollOffset = 0;
+std::vector<PageInfo> currentPages;
+int textScrollOffset = 0; 
 bool textRedrawNeeded = false;
+float currentTextSize = 4.0; // Default Size (Medium)
 
 // Async Task Globals
 enum AsyncOp { OP_OPEN, OP_LOAD_CHAPTER };
@@ -39,6 +41,14 @@ String targetOpenFile = "";
 int targetLoadChapterIndex = -1;
 volatile bool operationSuccess = false;
 volatile bool operationComplete = false;
+
+// Helpers
+void recalculatePages() {
+    int margin = 10;
+    int w = M5.Display.width() - (margin * 2);
+    int h = M5.Display.height() - 60; // Space for header
+    currentPages = Paginator::paginate(currentTextBuffer, 0, 0, w, h, currentTextSize);
+}
 
 // Unified Task for heavy stack operations
 void asyncLoaderTask(void * parameter) {
@@ -64,13 +74,15 @@ void asyncLoaderTask(void * parameter) {
             Serial.println("Task: Open Success. Loading Ch 0.");
             currentChapterIndex = 0;
             currentTextBuffer = reader.getChapterContent(0);
+            recalculatePages(); 
         }
         
     } else if (currentOp == OP_LOAD_CHAPTER) {
         Serial.printf("Task: Loading Chapter %d\n", targetLoadChapterIndex);
         currentChapterIndex = targetLoadChapterIndex;
         currentTextBuffer = reader.getChapterContent(currentChapterIndex);
-        operationSuccess = true; // minimal error checking on getChapterContent for now
+        recalculatePages();
+        operationSuccess = true; 
     }
 
     if (operationSuccess) {
@@ -159,30 +171,61 @@ void drawHome() {
 void drawReader() {
     if (!textRedrawNeeded) return;
     
-    M5.Display.fillScreen(COLOR_BG);
-    M5.Display.setTextSize(3); // Match Setup
-    M5.Display.setTextColor(COLOR_TEXT, COLOR_BG);
-    M5.Display.setCursor(10, 40); // Move down a bit for header
-    
-    int charsPerPage = 400; 
-    int startChar = textScrollOffset * charsPerPage;
-    if (startChar >= currentTextBuffer.length()) startChar = currentTextBuffer.length();
-    
-    // Safety check
+    // Check page validity
     if (currentTextBuffer.length() == 0) {
+        M5.Display.fillScreen(COLOR_BG);
+        M5.Display.setCursor(10, 40);
+        M5.Display.setTextColor(COLOR_TEXT, COLOR_BG);
         M5.Display.println("(Empty Chapter Content)");
-    } else {
-        String pageText = currentTextBuffer.substring(startChar, startChar + charsPerPage);
-        M5.Display.println(pageText);
+        textRedrawNeeded = false;
+        return;
     }
     
-    // Draw Header
+    if (textScrollOffset >= currentPages.size()) {
+       textScrollOffset = currentPages.size() - 1;
+       if (textScrollOffset < 0) textScrollOffset = 0;
+    }
+    
+    M5.Display.fillScreen(COLOR_BG);
+    
+    // Header
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(TFT_BLUE, COLOR_BG);
     M5.Display.setCursor(5, 5);
-    M5.Display.printf("Ch %d | Pg %d", currentChapterIndex + 1, textScrollOffset + 1);
+    // Page X of Y
+    M5.Display.printf("Ch %d | Pg %d/%d", currentChapterIndex + 1, textScrollOffset + 1, currentPages.size());
+    
+    // Draw Text using Paginator
+    if (currentPages.size() > 0) {
+        PageInfo p = currentPages[textScrollOffset];
+        int margin = 10;
+        int w = M5.Display.width() - (margin * 2);
+        int h = M5.Display.height() - 60;
+        
+        Paginator::drawPage(currentTextBuffer, p.start, p.length, margin, 40, w, h, currentTextSize, COLOR_TEXT);
+    }
     
     textRedrawNeeded = false;
+}
+
+void drawMenu() {
+    // Overlay menu
+    // Top 1/4 screen
+    int h = M5.Display.height() / 4;
+    M5.Display.fillRect(0, 0, M5.Display.width(), h, TFT_LIGHTGREY);
+    M5.Display.drawRect(0, 0, M5.Display.width(), h, TFT_BLACK);
+    
+    M5.Display.setTextColor(TFT_BLACK, TFT_LIGHTGREY);
+    M5.Display.setTextSize(2);
+    
+    // Buttons (Simple Text for now)
+    // Left: HOME
+    M5.Display.drawCenterString("[ HOME ]", M5.Display.width() * 0.2, h/2 - 10, &fonts::FreeSansBold9pt7b);
+    
+    // Right: SIZE
+    M5.Display.drawCenterString("[ SIZE ]", M5.Display.width() * 0.8, h/2 - 10, &fonts::FreeSansBold9pt7b);
+    
+    M5.Display.drawCenterString("MENU", M5.Display.width() * 0.5, 10, &fonts::FreeSansBold9pt7b);
 }
 
 // --- Setup & Loop ---
@@ -278,34 +321,32 @@ void loop() {
         if (M5.Touch.getCount() > 0) {
             auto t = M5.Touch.getDetail();
             if (t.wasPressed()) {
-                Serial.printf("Reader Touch: x=%d, y=%d (w=%d, h=%d)\n", t.x, t.y, width, height);
+                // New Logic:
+                // Left 25% -> PREV
+                // Right 25% -> NEXT
+                // Center 50% -> MENU
                 
-                if (t.x > width * 0.66) {
-                    Serial.println("Action: NEXT PAGE");
-                    // Next Page
-                    int charsPerPage = 400; 
-                    int maxPages = (currentTextBuffer.length() / charsPerPage) + 1;
-                     textScrollOffset++;
-                    if (textScrollOffset >= maxPages) {
+                if (t.x > width * 0.75) {
+                    // NEXT PAGE
+                    textScrollOffset++;
+                    if (textScrollOffset >= currentPages.size()) {
                         // Next Chapter
-                        Serial.printf("Action: NEXT CH (Current: %d, Total: %d)\n", currentChapterIndex, reader.getChapters().size());
-                        if (currentChapterIndex < reader.getChapters().size() - 1) {
+                         if (currentChapterIndex < reader.getChapters().size() - 1) {
                             targetLoadChapterIndex = currentChapterIndex + 1;
                             startAsyncOp(OP_LOAD_CHAPTER);
                         } else {
-                            textScrollOffset--;
+                            textScrollOffset--; // End of book
                         }
                     } else {
                         textRedrawNeeded = true;
                     }
-                } else if (t.x < width * 0.33) {
-                    Serial.println("Action: PREV PAGE");
-                    // Prev Page
+                } else if (t.x < width * 0.25) {
+                    // PREV PAGE
                     textScrollOffset--;
                     if (textScrollOffset < 0) {
                         if (currentChapterIndex > 0) {
                             targetLoadChapterIndex = currentChapterIndex - 1;
-                            startAsyncOp(OP_LOAD_CHAPTER);
+                             startAsyncOp(OP_LOAD_CHAPTER);
                         } else {
                             textScrollOffset = 0;
                         }
@@ -313,11 +354,46 @@ void loop() {
                          textRedrawNeeded = true;
                     }
                 } else {
-                    Serial.println("Action: HOME/MENU");
-                    // Center -> Back to Menu
-                    reader.close();
-                    currentState = STATE_HOME;
-                    drawHome();
+                    // CENTER -> OPEN MENU
+                    currentState = STATE_MENU;
+                    drawMenu();
+                }
+            }
+        }
+    }
+    else if (currentState == STATE_MENU) {
+        if (M5.Touch.getCount() > 0) {
+            auto t = M5.Touch.getDetail();
+            if (t.wasPressed()) {
+                // Top 1/4 is menu.
+                int h = height / 4;
+                if (t.y > h) {
+                    // Click outside -> Close Menu
+                    currentState = STATE_READING;
+                    textRedrawNeeded = true; // Redraw reader
+                } else {
+                    // Inside Menu
+                    // Left (Home)
+                    if (t.x < width * 0.4) {
+                        reader.close();
+                        currentState = STATE_HOME;
+                        drawHome();
+                    }
+                    // Right (Size)
+                    else if (t.x > width * 0.6) {
+                        // Toggle Size
+                        if (currentTextSize <= 3.0) currentTextSize = 4.0;
+                        else if (currentTextSize == 4.0) currentTextSize = 6.0;
+                        else currentTextSize = 3.0;
+                        
+                        // Repaginate
+                        M5.Display.fillScreen(COLOR_BG);
+                        M5.Display.drawCenterString("Resizing...", width/2, height/2, &fonts::FreeSansBold9pt7b);
+                        recalculatePages();
+                        
+                        currentState = STATE_READING;
+                        textRedrawNeeded = true;
+                    }
                 }
             }
         }
